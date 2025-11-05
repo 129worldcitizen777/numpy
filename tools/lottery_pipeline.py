@@ -200,14 +200,24 @@ def _scrape_lotteryusa(scraper: LotteryScraper, start_year: Optional[int], end_y
     assert requests is not None
     records: List[Tuple[datetime, Sequence[int], Sequence[int]]] = []
     current_year = datetime.utcnow().year
-    first_year = start_year or current_year
-    if start_year is None:
+    minimum_year = 1996  # historical limit for Mega Millions / Powerball
+
+    if start_year is not None and end_year is not None and end_year < start_year:
+        raise ValueError("end_year must be greater than or equal to start_year")
+
+    lower_bound = max(start_year if start_year is not None else minimum_year, minimum_year)
+    if end_year is not None:
+        first_year = min(end_year, current_year)
+    elif start_year is not None:
+        first_year = min(start_year, current_year)
+    else:
         # LotteryUSA typically stores archives back to early years.  To avoid
         # excessive traffic we probe backwards until we encounter an HTTP 404.
         first_year = current_year
+
     year = first_year
     seen_years: set[int] = set()
-    while year >= 1996:  # historical limit for Mega Millions / Powerball
+    while year >= minimum_year:
         if end_year is not None and year > end_year:
             year -= 1
             continue
@@ -250,9 +260,8 @@ def _scrape_lotteryusa(scraper: LotteryScraper, start_year: Optional[int], end_y
                 main_numbers = main_numbers[:scraper.main_balls]
             records.append((draw_date, main_numbers, bonus_numbers))
         seen_years.add(year)
-        if start_year is None and year > 1996:
-            year -= 1
-        else:
+        year -= 1
+        if year < lower_bound:
             break
     return _normalise_records(records, scraper.main_balls, scraper.bonus_balls)
 
