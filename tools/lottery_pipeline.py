@@ -208,8 +208,6 @@ def _scrape_lotteryusa(scraper: LotteryScraper, start_year: Optional[int], end_y
     lower_bound = max(start_year if start_year is not None else minimum_year, minimum_year)
     if end_year is not None:
         first_year = min(end_year, current_year)
-    elif start_year is not None:
-        first_year = min(start_year, current_year)
     else:
         # LotteryUSA typically stores archives back to early years.  To avoid
         # excessive traffic we probe backwards until we encounter an HTTP 404.
@@ -217,26 +215,23 @@ def _scrape_lotteryusa(scraper: LotteryScraper, start_year: Optional[int], end_y
 
     year = first_year
     seen_years: set[int] = set()
-    while year >= minimum_year:
+    while year >= lower_bound:
         if end_year is not None and year > end_year:
             year -= 1
             continue
         url = f"https://www.lotteryusa.com/{slug}/year/{year}/"
         response = requests.get(url, timeout=30)
         if response.status_code == 404:
-            if start_year is not None:
+            year -= 1
+            if year < lower_bound:
                 break
-            if year == current_year:
-                year -= 1
-                continue
-            else:
-                break
+            continue
         response.raise_for_status()
         tables = pd.read_html(response.text)
         if not tables:
-            if start_year is not None:
-                break
             year -= 1
+            if year < lower_bound:
+                break
             continue
         table = tables[0]
         table.columns = [str(col).strip().lower() for col in table.columns]
@@ -261,8 +256,6 @@ def _scrape_lotteryusa(scraper: LotteryScraper, start_year: Optional[int], end_y
             records.append((draw_date, main_numbers, bonus_numbers))
         seen_years.add(year)
         year -= 1
-        if year < lower_bound:
-            break
     return _normalise_records(records, scraper.main_balls, scraper.bonus_balls)
 
 
