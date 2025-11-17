@@ -233,9 +233,9 @@ def _scrape_lotteryusa(scraper: LotteryScraper, start_year: Optional[int], end_y
         response.raise_for_status()
         tables = pd.read_html(response.text)
         if not tables:
-            if start_year is not None:
-                break
             year -= 1
+            if year < lower_bound:
+                break
             continue
         table = tables[0]
         table.columns = [str(col).strip().lower() for col in table.columns]
