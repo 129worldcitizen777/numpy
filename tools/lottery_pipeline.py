@@ -224,13 +224,10 @@ def _scrape_lotteryusa(scraper: LotteryScraper, start_year: Optional[int], end_y
         url = f"https://www.lotteryusa.com/{slug}/year/{year}/"
         response = requests.get(url, timeout=30)
         if response.status_code == 404:
-            if start_year is not None:
+            year -= 1
+            if year < lower_bound:
                 break
-            if year == current_year:
-                year -= 1
-                continue
-            else:
-                break
+            continue
         response.raise_for_status()
         tables = pd.read_html(response.text)
         if not tables:
