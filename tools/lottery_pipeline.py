@@ -3,123 +3,46 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import os
 import random
 import re
-import subprocess
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow import keras
 
-AUTO_INSTALL = os.environ.get("LOTTERY_AUTO_INSTALL", "1") != "0"
-AUTO_UPGRADE = os.environ.get("LOTTERY_AUTO_UPGRADE", "0") == "1"
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.multioutput import MultiOutputRegressor
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import MinMaxScaler
+from xgboost import XGBRegressor
+from scipy.stats import chisquare, mode, norm
 
+import keras_tuner as kt
 
-def _install_package(package: str) -> None:
-    """Install (or upgrade) *package* via pip when auto-install is enabled."""
-
-    command = [sys.executable, "-m", "pip", "install"]
-    if AUTO_UPGRADE:
-        command.append("--upgrade")
-    command.append(package)
-    subprocess.check_call(command)
-
-
-def _import_or_install(module: str, package: Optional[str] = None, *, optional: bool = False):
-    """Import *module*, installing *package* on demand if necessary."""
-
-    try:
-        return importlib.import_module(module)
-    except ImportError:
-        if not AUTO_INSTALL:
-            if optional:
-                return None
-            raise
-        try:
-            _install_package(package or module)
-        except Exception:
-            if optional:
-                return None
-            raise
-        try:
-            return importlib.import_module(module)
-        except ImportError:
-            if optional:
-                return None
-            raise
-
-
-if "--no-auto-install" in sys.argv:
-    AUTO_INSTALL = False
-if "--upgrade-deps" in sys.argv:
-    AUTO_UPGRADE = True
-
-
-np = _import_or_install("numpy")
-pd = _import_or_install("pandas")
-tf = _import_or_install("tensorflow")
-keras = tf.keras
-
-kt = _import_or_install("keras_tuner", "keras-tuner")
-
-sklearn_ensemble = _import_or_install("sklearn.ensemble", "scikit-learn")
-RandomForestRegressor = getattr(sklearn_ensemble, "RandomForestRegressor")
-
-sklearn_multioutput = _import_or_install("sklearn.multioutput", "scikit-learn")
-MultiOutputRegressor = getattr(sklearn_multioutput, "MultiOutputRegressor")
-
-sklearn_linear = _import_or_install("sklearn.linear_model", "scikit-learn")
-Ridge = getattr(sklearn_linear, "Ridge")
-
-sklearn_model_selection = _import_or_install("sklearn.model_selection", "scikit-learn")
-TimeSeriesSplit = getattr(sklearn_model_selection, "TimeSeriesSplit")
-
-sklearn_preprocessing = _import_or_install("sklearn.preprocessing", "scikit-learn")
-MinMaxScaler = getattr(sklearn_preprocessing, "MinMaxScaler")
-
-xgb_module = _import_or_install("xgboost", "xgboost")
-XGBRegressor = getattr(xgb_module, "XGBRegressor")
-
-scipy_stats = _import_or_install("scipy.stats", "scipy")
-chisquare = getattr(scipy_stats, "chisquare")
-mode = getattr(scipy_stats, "mode")
-norm = getattr(scipy_stats, "norm")
-
-deap_algorithms = _import_or_install("deap.algorithms", "deap")
-deap_base = _import_or_install("deap.base", "deap")
-deap_creator = _import_or_install("deap.creator", "deap")
-deap_tools = _import_or_install("deap.tools", "deap")
-algorithms = deap_algorithms
-base = deap_base
-creator = deap_creator
-tools = deap_tools
-
-skopt_module = _import_or_install("skopt", "scikit-optimize")
-gp_minimize = getattr(skopt_module, "gp_minimize")
-skopt_space = _import_or_install("skopt.space", "scikit-optimize")
-Integer = getattr(skopt_space, "Integer")
-Real = getattr(skopt_space, "Real")
+from deap import algorithms, base, creator, tools
+from skopt import gp_minimize
+from skopt.space import Integer, Real
 
 # Optional dependencies: requests, bs4, shap.  They are imported lazily so the
 # core pipeline can still operate when those modules are unavailable (for
 # example inside the numpy CI environment).
-requests_module = _import_or_install("requests", optional=True)
-bs4_module = _import_or_install("bs4", "beautifulsoup4", optional=True)
-if requests_module is not None and bs4_module is not None:
-    requests = requests_module
-    BeautifulSoup = getattr(bs4_module, "BeautifulSoup")
-else:  # pragma: no cover - optional import fallback
+try:  # pragma: no cover - optional import
+    import requests
+    from bs4 import BeautifulSoup
+except Exception:  # pragma: no cover - optional import
     requests = None
     BeautifulSoup = None
 
-shap_module = _import_or_install("shap", optional=True)
-if shap_module is not None:
-    shap = shap_module
-else:  # pragma: no cover - optional import fallback
+try:  # pragma: no cover - optional import
+    import shap
+except Exception:  # pragma: no cover - optional import
     shap = None
 
 SEED = 42
@@ -200,42 +123,33 @@ def _scrape_lotteryusa(scraper: LotteryScraper, start_year: Optional[int], end_y
     assert requests is not None
     records: List[Tuple[datetime, Sequence[int], Sequence[int]]] = []
     current_year = datetime.utcnow().year
-    minimum_year = 1996  # historical limit for Mega Millions / Powerball
-
-    if start_year is not None and end_year is not None and end_year < start_year:
-        raise ValueError("end_year must be greater than or equal to start_year")
-
-    lower_bound = max(start_year if start_year is not None else minimum_year, minimum_year)
-    if end_year is not None:
-        first_year = min(end_year, current_year)
-    elif start_year is not None:
-        # When only a lower bound is provided, start from the most recent year
-        # and work backward until the requested start year.
-        first_year = current_year
-    else:
+    first_year = start_year or current_year
+    if start_year is None:
         # LotteryUSA typically stores archives back to early years.  To avoid
         # excessive traffic we probe backwards until we encounter an HTTP 404.
         first_year = current_year
-
     year = first_year
     seen_years: set[int] = set()
-    while year >= lower_bound:
+    while year >= 1996:  # historical limit for Mega Millions / Powerball
         if end_year is not None and year > end_year:
             year -= 1
             continue
         url = f"https://www.lotteryusa.com/{slug}/year/{year}/"
         response = requests.get(url, timeout=30)
         if response.status_code == 404:
-            year -= 1
-            if year < lower_bound:
+            if start_year is not None:
                 break
-            continue
+            if year == current_year:
+                year -= 1
+                continue
+            else:
+                break
         response.raise_for_status()
         tables = pd.read_html(response.text)
         if not tables:
-            year -= 1
-            if year < lower_bound:
+            if start_year is not None:
                 break
+            year -= 1
             continue
         table = tables[0]
         table.columns = [str(col).strip().lower() for col in table.columns]
@@ -259,7 +173,10 @@ def _scrape_lotteryusa(scraper: LotteryScraper, start_year: Optional[int], end_y
                 main_numbers = main_numbers[:scraper.main_balls]
             records.append((draw_date, main_numbers, bonus_numbers))
         seen_years.add(year)
-        year -= 1
+        if start_year is None and year > 1996:
+            year -= 1
+        else:
+            break
     return _normalise_records(records, scraper.main_balls, scraper.bonus_balls)
 
 
@@ -809,16 +726,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--diagnostics", action="store_true", help="Include randomness diagnostics in the output")
     parser.add_argument("--mc-samples", type=int, default=50, help="Number of Monte Carlo samples for transformer uncertainty")
     parser.add_argument("--output", type=str, default=None, help="Optional path to store predictions as JSON")
-    parser.add_argument(
-        "--no-auto-install",
-        action="store_true",
-        help="Skip automatic dependency installation (can also set LOTTERY_AUTO_INSTALL=0)",
-    )
-    parser.add_argument(
-        "--upgrade-deps",
-        action="store_true",
-        help="Upgrade dependencies when auto-installing (or set LOTTERY_AUTO_UPGRADE=1)",
-    )
     return parser.parse_args(argv)
 
 
