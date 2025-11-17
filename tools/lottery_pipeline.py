@@ -208,6 +208,10 @@ def _scrape_lotteryusa(scraper: LotteryScraper, start_year: Optional[int], end_y
     lower_bound = max(start_year if start_year is not None else minimum_year, minimum_year)
     if end_year is not None:
         first_year = min(end_year, current_year)
+    elif start_year is not None:
+        # When only a lower bound is provided, start from the most recent year
+        # and work backward until the requested start year.
+        first_year = current_year
     else:
         # LotteryUSA typically stores archives back to early years.  To avoid
         # excessive traffic we probe backwards until we encounter an HTTP 404.
